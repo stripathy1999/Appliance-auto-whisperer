@@ -1,0 +1,11 @@
+{
+  "items": [
+    {
+      "id": {"videoId": "abc123"},
+      "snippet": {
+        "title": "Dryer repair — belt replacement",
+        "channelTitle": "Repair Channel"
+      }
+    }
+  ]
+}

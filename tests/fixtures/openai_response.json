@@ -1,0 +1,6 @@
+{
+  "summary": "Test diagnosis summary",
+  "likely_causes": ["Cause A"],
+  "suggested_parts": ["Part 1"],
+  "safety_notes": ["Unplug first."]
+}

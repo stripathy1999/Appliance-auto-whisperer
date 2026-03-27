@@ -1,0 +1,12 @@
+{
+  "query": "dishwasher",
+  "offers": [
+    {
+      "title": "door seal — see search query in sourcing.notes",
+      "url": "",
+      "vendor": "search",
+      "price_hint": null
+    }
+  ],
+  "notes": "dishwasher door seal buy site:repairclinic.com OR site:amazon.com"
+}

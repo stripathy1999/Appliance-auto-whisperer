@@ -1,0 +1,21 @@
+# Fetch.ai uAgents bureau: repair-orchestrator (Chat Protocol) + internal workers.
+# Mailbox mode: set AGENTVERSE_API_KEY, leave AGENT_ENDPOINT empty (see README).
+# Render injects PORT — diagnostic_bureau reads PORT for the Bureau ASGI server.
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+COPY requirements.txt pyproject.toml README.md ./
+COPY app ./app
+COPY diagnostic_bureau.py ./
+
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir -e .
+
+EXPOSE 8000
+
+CMD ["sh", "-c", "exec python diagnostic_bureau.py"]

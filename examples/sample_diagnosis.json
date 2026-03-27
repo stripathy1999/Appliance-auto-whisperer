@@ -1,0 +1,6 @@
+{
+  "summary": "Likely door seal or lower spray arm gasket leak.",
+  "likely_causes": ["Worn door gasket", "Clogged spray arm causing overspray"],
+  "suggested_parts": ["door seal", "lower spray arm gasket"],
+  "safety_notes": ["Disconnect power before removing panels."]
+}
