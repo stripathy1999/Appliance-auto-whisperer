@@ -1,0 +1,36 @@
+# Never commit secrets or local state to the Docker image.
+.env
+.venv/
+.venv-*/
+venv/
+
+# Git / IDE
+/.git
+/.github
+/.cursor
+__pycache__/
+*.pyc
+*.pyo
+
+# Build artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+
+# Local runtime outputs (not needed in image)
+*.log
+reports/
+uagents_core.log
+*_data.json
+
+# Local scripts not needed in container
+scripts/
+
+# Test suite (not needed at runtime — add back if you run tests in CI)
+tests/
+
+# Local agent keystore / data file (regenerated at runtime)
+agent1q*.json

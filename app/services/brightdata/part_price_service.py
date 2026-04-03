@@ -228,7 +228,17 @@ async def _scrape_partselect(part_number: str, part_name: str, proxy: str | None
             r.raise_for_status()
             html = r.text
     except Exception as e:
-        log.debug("PartSelect failed: %s", e)
+        msg = str(e)
+        if "bad_endpoint" in msg or "robots.txt" in msg:
+            log.warning(
+                "[partselect] Bright Data zone does not have PartSelect access "
+                "(bad_endpoint/robots.txt). Ask your account manager to enable it. "
+                "Returning search link."
+            )
+        elif "407" in msg or "Proxy" in msg.lower():
+            log.warning("[partselect] Bright Data proxy auth error — check BRIGHTDATA credentials.")
+        else:
+            log.debug("PartSelect failed: %s", e)
         return [_link_stub(part_number, part_name, "partselect.com", url)]
 
     # Gate: only extract prices if the page is actually about our part

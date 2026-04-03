@@ -20,7 +20,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 from uagents import Agent, Context, Protocol
 from uagents.registration import AlmanacApiRegistrationPolicy
 
-from app.services.brightdata.part_price_service import fetch_parts_deterministic, save_parts_excel
+from app.services.brightdata.part_price_service import fetch_parts_deterministic
 from app.uagents_protocol.schemas import PartSource, PartsSourcingRequest, PartsSourcingResponse
 
 logging.basicConfig(
@@ -33,12 +33,15 @@ log = logging.getLogger("parts-agent")
 
 PORT = int(os.getenv("PARTS_AGENT_PORT", "8002"))
 SEED = os.getenv("PARTS_AGENT_SEED", "parts sourcing worker agent seed phrase one")
+# In Docker multi-container mode PARTS_AGENT_HOST is the service name (e.g. "parts-agent").
+# Locally defaults to 127.0.0.1.
+HOST = os.getenv("PARTS_AGENT_HOST", "127.0.0.1")
 
 parts_agent = Agent(
     name="parts-sourcing-agent",
     seed=SEED,
     port=PORT,
-    endpoint=[f"http://127.0.0.1:{PORT}/submit"],
+    endpoint=[f"http://{HOST}:{PORT}/submit"],
     mailbox=False,
     registration_policy=AlmanacApiRegistrationPolicy(),
 )
@@ -53,9 +56,8 @@ async def handle_parts_request(ctx: Context, sender: str, msg: PartsSourcingRequ
     log.info("[parts] Request: part=%s (%s) context=%r", msg.part_name, msg.part_number, msg.context_text)
     d = await fetch_parts_deterministic(msg.part_name, msg.part_number, msg.context_text)
 
-    excel_path = save_parts_excel(d.get("all_sources", []), msg.part_name, msg.part_number) or ""
-    if excel_path:
-        log.info("[parts] Excel saved: %s", excel_path)
+    # fetch_parts_deterministic already saves the Excel report and returns its path.
+    excel_path = str(d.get("excel_path") or "")
 
     all_sources = [
         PartSource(

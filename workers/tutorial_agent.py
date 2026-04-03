@@ -32,12 +32,14 @@ log = logging.getLogger("tutorial-agent")
 
 PORT = int(os.getenv("TUTORIAL_AGENT_PORT", "8003"))
 SEED = os.getenv("TUTORIAL_AGENT_SEED", "tutorial youtube worker agent seed two")
+# In Docker multi-container mode TUTORIAL_AGENT_HOST is the service name (e.g. "tutorial-agent").
+HOST = os.getenv("TUTORIAL_AGENT_HOST", "127.0.0.1")
 
 tutorial_agent = Agent(
     name="tutorial-agent",
     seed=SEED,
     port=PORT,
-    endpoint=[f"http://127.0.0.1:{PORT}/submit"],
+    endpoint=[f"http://{HOST}:{PORT}/submit"],
     mailbox=False,
     registration_policy=AlmanacApiRegistrationPolicy(),
 )

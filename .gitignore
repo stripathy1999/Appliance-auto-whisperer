@@ -1,5 +1,6 @@
 .env
 .venv/
+.venv-*/
 venv/
 __pycache__/
 *.pyc
@@ -12,3 +13,7 @@ dist/
 build/
 *.log
 *_data.json
+reports/
+# uAgents local keystore / state files
+agent1q*.json
+uagents_core.log

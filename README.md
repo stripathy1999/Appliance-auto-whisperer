@@ -39,9 +39,9 @@ ASI:One / Agentverse
 
 **Key design choices:**
 - ASI:One talks to **exactly one agent** (`repair-orchestrator`).
-- OpenAI SDK is used **only as a data translator** — structured JSON extraction, not open-ended chat.
+- **OpenAI Python SDK** is used as the unified LLM client — Gemini vision is accessed via Gemini's OpenAI-compatible endpoint (`generativelanguage.googleapis.com/v1beta/openai/`), not the Google ADK. No Anthropic/Claude SDK is used.
 - Bright Data and YouTube calls are **deterministic** — no AI in the scraping/API layer.
-- Workers run in the same Bureau process; `ctx.send_and_receive` handles scatter-gather cleanly.
+- The orchestrator sends `PartsSourcingRequest` / `TutorialSearchRequest` to the worker agents via **uAgents scatter-gather** (asyncio.Future keyed by session_id). If workers don't respond within `WORKER_TIMEOUT_S` seconds it falls back to direct service calls automatically, so the agent is always available.
 
 ---
 
@@ -49,26 +49,45 @@ ASI:One / Agentverse
 
 ```
 appliance-auto-whisperer/
-├── diagnostic_bureau.py          ← Entry point: Bureau + all 3 agents
+├── diagnostic_bureau.py          ← Orchestrator entry point (Chat Protocol + scatter-gather)
+├── workers/
+│   ├── parts_agent.py            ← parts-sourcing-agent (Bright Data → price results)
+│   └── tutorial_agent.py         ← tutorial-agent (YouTube Data API v3)
 ├── app/
 │   ├── config/
 │   │   └── settings.py           ← Pydantic Settings (reads .env)
 │   ├── services/
 │   │   ├── openai/
-│   │   │   └── vision_part_extractor.py   ← GPT-4o Vision → structured JSON
+│   │   │   └── vision_part_extractor.py   ← Vision LLM (Gemini/GPT-4o via OpenAI SDK)
 │   │   ├── brightdata/
 │   │   │   └── part_price_service.py      ← Bright Data Web Unlocker proxy
 │   │   └── youtube/
 │   │       └── instructor_service.py      ← YouTube Data API v3 ranking
 │   └── uagents_protocol/
-│       ├── schemas.py            ← uAgents Model payloads (Pydantic v1)
+│       ├── schemas.py            ← PartsSourcingRequest/Response, TutorialSearch*
 │       ├── chat_inbound.py       ← Parse ChatMessage → context_text + image_b64
 │       └── final_markdown.py     ← Build hero Markdown response
-├── .env.example                  ← Copy to .env and fill in API keys
-├── Dockerfile.bureau             ← Docker image for Render / production
+├── docker-compose.yml            ← Multi-container local deployment (bureau + rest profiles)
+├── docker-entrypoint.sh          ← Single-container startup (all 3 agents in one dyno)
+├── Dockerfile.bureau             ← Docker image for all 3 bureau services
+├── Dockerfile                    ← Docker image for REST API only
 ├── render.yaml                   ← Render.com service definition (mailbox mode)
+├── .env.example                  ← Copy to .env and fill in API keys
 └── requirements.txt
 ```
+
+---
+
+## Worker Communication (Scatter-Gather)
+
+When you run **all three processes** (parts-agent, tutorial-agent, orchestrator), the orchestrator communicates with them via the **uAgents message protocol**:
+
+1. Orchestrator sends `PartsSourcingRequest` to `parts-sourcing-agent` and `TutorialSearchRequest` to `tutorial-agent` simultaneously.
+2. Each worker processes the request and sends back `PartsSourcingResponse` / `TutorialSearchResponse`.
+3. The orchestrator awaits both via `asyncio.Future` keyed by `session_id` (up to `WORKER_TIMEOUT_S` seconds).
+4. If workers don't respond in time (e.g. not running), the orchestrator **falls back automatically** to calling the service functions directly — the agent stays available regardless.
+
+> You will see `← parts-agent:` and `← tutorial-agent:` log lines on the orchestrator when communication is working correctly.
 
 ---
 
@@ -214,6 +233,34 @@ so ASI:One can discover it.
 
 ---
 
+## Deploy with Docker (local)
+
+Copy `.env.example` to `.env` and fill in required keys, then choose a mode:
+
+**Mode A — Full 3-agent bureau (recommended, proper inter-agent communication):**
+```bash
+docker-compose --profile bureau up --build
+# or: make docker-up
+```
+Starts `parts-agent` (port 8002) + `tutorial-agent` (port 8003) + `orchestrator` (port 8001).
+Workers come up first; orchestrator waits for both to be healthy before starting.
+
+**Mode B — REST API only (no uAgents, simpler):**
+```bash
+docker-compose --profile rest up --build
+# or: make docker-up-rest
+```
+REST endpoint at `http://localhost:8000/health` and `POST /v1/chat`.
+
+**Mode C — Single container (all 3 in one, Render-style):**
+```bash
+docker build -f Dockerfile.bureau -t whisperer-bureau .
+docker run --env-file .env -e PORT=8001 -p 8001:8001 \
+  --entrypoint /app/docker-entrypoint.sh whisperer-bureau
+```
+
+---
+
 ## Deploy to Render (mailbox mode)
 
 1. Push this folder to a GitHub repo.
@@ -244,7 +291,7 @@ if ($p) { Stop-Process -Id $p -Force; "Killed PID $p" } else { "Port 8000 is fre
 
 ### `jiter` build failure on Windows (OpenAI dependency)
 
-Use Python from **python.org** (not MSYS/Conda) so prebuilt wheels are available, or run inside Docker (`docker build -f Dockerfile.bureau -t whisperer . && docker run --env-file .env -p 8000:8000 whisperer`).
+Use Python from **python.org** (not MSYS/Conda) so prebuilt wheels are available, or run inside Docker (`docker build -f Dockerfile.bureau -t whisperer . && docker run --env-file .env -e PORT=8001 -p 8001:8001 whisperer`).
 
 ### Bright Data returns no price
 

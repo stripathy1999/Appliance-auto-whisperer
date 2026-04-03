@@ -21,6 +21,17 @@ Uses **mailbox** when `AGENT_ENDPOINT` is unset; set `AGENTVERSE_API_KEY` for Ag
 - **Bureau (recommended for Fetch / ASI:One):** `Dockerfile.bureau` → `make docker-build-bureau`
 - **REST only:** root `Dockerfile` → `make docker-build`
 
+### Docker Compose (local)
+
+Use the agent folder’s `docker-compose.yml` with your configured `.env`:
+
+```bash
+docker-compose up --build
+```
+
+- REST API: `http://localhost:8000/health` and `POST http://localhost:8000/v1/chat`
+- uAgents bureau: binds on `PORT=8001` (see `diagnostic_bureau.py`)
+
 ## Render + mailbox → Agentverse
 
 1. Deploy from `render.yaml` (service `repair-orchestrator-bureau`, `Dockerfile.bureau`).
