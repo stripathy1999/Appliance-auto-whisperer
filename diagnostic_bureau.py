@@ -180,7 +180,7 @@ def _chat_reply(text: str, *, end_session: bool = True) -> ChatMessage:
         content.append(EndSessionContent(type="end-session"))
     return ChatMessage(
         timestamp=datetime.now(timezone.utc),
-        msg_id=None,
+        msg_id=uuid4(),
         content=content,
     )
 
