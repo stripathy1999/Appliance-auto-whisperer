@@ -4,10 +4,11 @@ Appliance / Auto Whisperer — Orchestrator Agent
 Receives ChatMessage from ASI:One via Agentverse mailbox, runs the full
 pipeline (Vision → Parts → Tutorial) and sends a Markdown hero response.
 
-Worker communication (parallel scatter-gather):
-  Uses ctx.send_and_receive() — the same built-in request/response primitive
-  as pdf-podcast-agent — wrapped in asyncio.gather() for true parallelism.
-  Both workers are called simultaneously; results merge once both reply.
+Worker communication (synchronous send_and_receive):
+  Uses ctx.send_and_receive(sync=True) — the worker's ASGI server returns
+  the response directly in the HTTP body.  This avoids a mailbox deadlock:
+  the orchestrator's mailbox-poll loop is blocked while handling a message,
+  so async responses queued in Agentverse would never be picked up.
   If workers are unreachable or timeout, the pipeline falls back to calling
   the service functions directly so the agent is always available.
 
@@ -154,10 +155,11 @@ async def orchestrator_chat(ctx: Context, sender: str, msg: ChatMessage):
       2. Parse image + context_text from ChatMessage
       3. Send progress message
       4. Vision LLM → identify part
-      5. Parallel scatter-gather via ctx.send_and_receive():
+      5. ctx.send_and_receive(sync=True) to both workers:
            parts-agent   ← PartsSourcingRequest
            tutorial-agent ← TutorialSearchRequest
-         Both calls run concurrently inside asyncio.gather().
+         sync=True returns the response in the HTTP body — avoids a
+         deadlock where the mailbox-poll loop is blocked by this handler.
          Falls back to direct service calls if workers are unavailable.
       6. Format hero Markdown → send reply
 
@@ -231,12 +233,19 @@ async def _run_pipeline(ctx: Context, sender: str, msg: ChatMessage) -> None:
         vision["estimated_labor_cost"], vision["confidence"] * 100,
     )
 
-    # 5 ── Fan-out: parallel ctx.send_and_receive() to both workers
+    # 5 ── Fan-out: ctx.send_and_receive(sync=True) to both workers
     #
-    # Mirrors the pdf-podcast-agent pattern: asyncio.gather() runs both
-    # send_and_receive calls concurrently so workers execute in parallel.
-    # send_and_receive() handles the full request → mailbox → response cycle
-    # internally; no asyncio.Future plumbing required.
+    # Why sync=True is essential:
+    #   The orchestrator is in mailbox mode.  When it handles an ASI:One
+    #   message, the mailbox-poll loop is blocked (awaiting this handler).
+    #   If workers send responses to the Agentverse mailbox (async path),
+    #   those responses sit in the queue — the poll loop can't pick them up
+    #   until this handler finishes → deadlock → 120s timeout.
+    #
+    #   sync=True fixes this: the worker's ASGI server returns the response
+    #   in the HTTP body.  No Agentverse relay needed for the return path.
+    #   The dispenser processes envelopes sequentially, so the two calls
+    #   execute one after the other (~35-40s total), but they WORK.
     search_query = (
         f"{context_text} {vision['part_name']} {vision['part_number']} replacement repair tutorial"
     ).strip()
@@ -249,7 +258,7 @@ async def _run_pipeline(ctx: Context, sender: str, msg: ChatMessage) -> None:
     )
 
     log.info(
-        "[orch] Scatter-gather (send_and_receive) → parts=%s… | tutorial=%s… | timeout=%ds",
+        "[orch] send_and_receive(sync) → parts=%s… | tutorial=%s… | timeout=%ds",
         parts_addr[:20], tut_addr[:20], _WORKER_TIMEOUT_S,
     )
 
@@ -263,6 +272,7 @@ async def _run_pipeline(ctx: Context, sender: str, msg: ChatMessage) -> None:
                 session_id=str(uuid4()),
             ),
             response_type=PartsSourcingResponse,
+            sync=True,
             timeout=_WORKER_TIMEOUT_S,
         ),
         ctx.send_and_receive(
@@ -272,6 +282,7 @@ async def _run_pipeline(ctx: Context, sender: str, msg: ChatMessage) -> None:
                 session_id=str(uuid4()),
             ),
             response_type=TutorialSearchResponse,
+            sync=True,
             timeout=_WORKER_TIMEOUT_S,
         ),
     )
