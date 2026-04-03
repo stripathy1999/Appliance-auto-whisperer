@@ -46,7 +46,7 @@ services:
       # Seconds to wait for worker agents to respond before falling back to
       # direct service calls.  Increase on slow free-plan dynos.
       - key: WORKER_TIMEOUT_S
-        value: "90"
+        value: "120"
       # Single-container mode: the bureau image's default CMD runs diagnostic_bureau.py
       # (orchestrator only, direct service calls — no separate worker processes).
       # For full 3-agent bureau in one Render dyno, override startCommand:

@@ -4,6 +4,12 @@ Tutorial-Search Worker Agent — run in its own terminal.
 Terminal 1:  python workers/parts_agent.py
 Terminal 2:  python workers/tutorial_agent.py
 Terminal 3:  python diagnostic_bureau.py        ← orchestrator
+
+Mailbox mode:
+  When AGENTVERSE_API_KEY is set, the worker registers a mailbox so the
+  Agentverse relay can deliver messages from the orchestrator (also in
+  mailbox mode).  Without a mailbox, Agentverse's relay servers cannot
+  reach 127.0.0.1 and the messages are silently dropped.
 """
 import logging
 import os
@@ -30,17 +36,20 @@ log = logging.getLogger("tutorial-agent")
 
 # ── Agent ─────────────────────────────────────────────────────────────────────
 
-PORT = int(os.getenv("TUTORIAL_AGENT_PORT", "8003"))
-SEED = os.getenv("TUTORIAL_AGENT_SEED", "tutorial youtube worker agent seed two")
-# In Docker multi-container mode TUTORIAL_AGENT_HOST is the service name (e.g. "tutorial-agent").
-HOST = os.getenv("TUTORIAL_AGENT_HOST", "127.0.0.1")
+PORT    = int(os.getenv("TUTORIAL_AGENT_PORT", "8003"))
+SEED    = os.getenv("TUTORIAL_AGENT_SEED", "tutorial youtube worker agent seed two")
+HOST    = os.getenv("TUTORIAL_AGENT_HOST", "127.0.0.1")
+AV_KEY  = os.getenv("AGENTVERSE_API_KEY", "").strip()
+
+USE_MAILBOX = bool(AV_KEY) and not os.getenv("TUTORIAL_AGENT_HOST", "")
 
 tutorial_agent = Agent(
     name="tutorial-agent",
     seed=SEED,
     port=PORT,
     endpoint=[f"http://{HOST}:{PORT}/submit"],
-    mailbox=False,
+    mailbox=USE_MAILBOX,
+    **({"agentverse": {"api_key": AV_KEY}} if USE_MAILBOX else {}),
     registration_policy=AlmanacApiRegistrationPolicy(),
 )
 
@@ -51,7 +60,7 @@ instructor_protocol = Protocol(name="TutorialSearchProtocol", version="0.3.0")
 
 @instructor_protocol.on_message(model=TutorialSearchRequest, replies=TutorialSearchResponse)
 async def handle_tutorial_request(ctx: Context, sender: str, msg: TutorialSearchRequest):
-    log.info("[tutorial] Query: %s", msg.search_query)
+    log.info("[tutorial] Request received: query=%s", msg.search_query[:80])
     try:
         vurl, title, dur = await find_best_tutorial_video(msg.search_query)
         resp = TutorialSearchResponse(
@@ -62,7 +71,6 @@ async def handle_tutorial_request(ctx: Context, sender: str, msg: TutorialSearch
         )
         log.info("[tutorial] Done — '%s' %s", title, vurl)
     except Exception as exc:  # noqa: BLE001
-        # Always respond so the orchestrator isn't left waiting on a timed-out future.
         log.exception("[tutorial] Service error — sending empty response: %s", exc)
         resp = TutorialSearchResponse(
             video_url="",
@@ -72,6 +80,7 @@ async def handle_tutorial_request(ctx: Context, sender: str, msg: TutorialSearch
         )
 
     await ctx.send(sender, resp)
+    log.info("[tutorial] Response sent back to orchestrator")
 
 
 tutorial_agent.include(instructor_protocol, publish_manifest=False)
@@ -81,8 +90,9 @@ tutorial_agent.include(instructor_protocol, publish_manifest=False)
 @tutorial_agent.on_event("startup")
 async def startup(ctx: Context):
     log.info("Tutorial Agent ready")
-    log.info("  Address : %s", ctx.agent.address)
-    log.info("  Endpoint: http://%s:%d/submit", HOST, PORT)
+    log.info("  Address  : %s", ctx.agent.address)
+    log.info("  Endpoint : http://%s:%d/submit", HOST, PORT)
+    log.info("  Mailbox  : %s", "enabled" if USE_MAILBOX else "disabled (direct HTTP)")
 
 
 if __name__ == "__main__":

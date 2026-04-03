@@ -76,7 +76,9 @@ log = logging.getLogger("orchestrator")
 _pending: dict[str, asyncio.Future] = {}
 
 # How long to wait for a worker reply before falling back to direct calls.
-_WORKER_TIMEOUT_S: float = float(os.getenv("WORKER_TIMEOUT_S", "60"))
+# With Agentverse mailbox round-trips (~10-20s each direction) + processing time
+# (~30-40s for parts scraping), 120s is a safe default.
+_WORKER_TIMEOUT_S: float = float(os.getenv("WORKER_TIMEOUT_S", "120"))
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -113,13 +113,17 @@ Fill in at minimum:
 ```powershell
 python workers/parts_agent.py
 ```
-Expected: `Parts-Sourcing Agent ready · Address: agent1q...`
+Expected: `Parts-Sourcing Agent ready` + `Mailbox: enabled`
 
 **Terminal 2 — Tutorial Worker (port 8003)**
 ```powershell
 python workers/tutorial_agent.py
 ```
-Expected: `Tutorial Agent ready · Address: agent1q...`
+Expected: `Tutorial Agent ready` + `Mailbox: enabled`
+
+> **Why mailbox mode for workers?**  
+> The orchestrator routes outgoing `ctx.send()` through the Agentverse relay (because it's in mailbox mode). Agentverse relay servers cannot reach `http://127.0.0.1:8002` — they're on the internet. Workers must therefore also register a mailbox so Agentverse can deliver the message to them.  
+> With `AGENTVERSE_API_KEY` set in `.env`, workers enable mailbox automatically. Without it they use direct HTTP (for Docker with internal networking).
 
 **Terminal 3 — Orchestrator / ASI:One gateway (port 8001)**
 ```powershell
@@ -274,9 +278,18 @@ if ($p) { Stop-Process -Id $p -Force; "Killed PID $p" } else { "Port free" }
 ```
 The orchestrator also auto-kills stale processes on startup via `psutil` (install with `pip install psutil`).
 
-### Workers show no log activity when a message arrives
+### Workers show no log activity / `Workers timed out` after 60s
 
-The orchestrator logs `[orch] Scatter-gather →` when it dispatches to workers. If you see `[orch] Workers timed out` instead, the workers haven't registered on the Almanac yet — wait ~5 s after starting them and try again.
+The orchestrator is in mailbox mode, so `ctx.send()` routes through the Agentverse relay. Agentverse relay servers **cannot reach `127.0.0.1`**. Workers must be in mailbox mode too.
+
+**Fix**: make sure `AGENTVERSE_API_KEY` is set in `.env` before starting the workers. With the key present, workers auto-enable mailbox mode (`Mailbox: enabled` in their startup log). Without it, workers only log `Mailbox: disabled (direct HTTP)` and will time out when the orchestrator is in mailbox mode.
+
+You should see this on the parts-agent terminal when a message arrives:
+```
+[parts] Request received: part=Evaporator Fan Motor (W10861645)
+[parts] Done — $19.97 at amazon.com (6 sources)
+[parts] Response sent back to orchestrator
+```
 
 ### `jiter` build failure on Windows
 

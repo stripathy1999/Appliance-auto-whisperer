@@ -4,13 +4,18 @@ Parts-Sourcing Worker Agent — run in its own terminal.
 Terminal 1:  python workers/parts_agent.py
 Terminal 2:  python workers/tutorial_agent.py
 Terminal 3:  python diagnostic_bureau.py        ← orchestrator
+
+Mailbox mode:
+  When AGENTVERSE_API_KEY is set, the worker registers a mailbox so the
+  Agentverse relay can deliver messages from the orchestrator (also in
+  mailbox mode).  Without a mailbox, Agentverse's relay servers cannot
+  reach 127.0.0.1 and the messages are silently dropped.
 """
 import logging
 import os
 import sys
 from pathlib import Path
 
-# Make sure the project root is on sys.path so `app.*` imports work.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -31,18 +36,23 @@ log = logging.getLogger("parts-agent")
 
 # ── Agent ─────────────────────────────────────────────────────────────────────
 
-PORT = int(os.getenv("PARTS_AGENT_PORT", "8002"))
-SEED = os.getenv("PARTS_AGENT_SEED", "parts sourcing worker agent seed phrase one")
-# In Docker multi-container mode PARTS_AGENT_HOST is the service name (e.g. "parts-agent").
-# Locally defaults to 127.0.0.1.
-HOST = os.getenv("PARTS_AGENT_HOST", "127.0.0.1")
+PORT    = int(os.getenv("PARTS_AGENT_PORT", "8002"))
+SEED    = os.getenv("PARTS_AGENT_SEED", "parts sourcing worker agent seed phrase one")
+HOST    = os.getenv("PARTS_AGENT_HOST", "127.0.0.1")
+AV_KEY  = os.getenv("AGENTVERSE_API_KEY", "").strip()
+
+# Enable mailbox when the orchestrator is also in mailbox mode so the
+# Agentverse relay can deliver messages between both agents.
+# In Docker (direct networking) leave mailbox off and set PARTS_AGENT_HOST.
+USE_MAILBOX = bool(AV_KEY) and not os.getenv("PARTS_AGENT_HOST", "")
 
 parts_agent = Agent(
     name="parts-sourcing-agent",
     seed=SEED,
     port=PORT,
     endpoint=[f"http://{HOST}:{PORT}/submit"],
-    mailbox=False,
+    mailbox=USE_MAILBOX,
+    **({"agentverse": {"api_key": AV_KEY}} if USE_MAILBOX else {}),
     registration_policy=AlmanacApiRegistrationPolicy(),
 )
 
@@ -53,7 +63,7 @@ parts_protocol = Protocol(name="PartsSourcingProtocol", version="0.3.0")
 
 @parts_protocol.on_message(model=PartsSourcingRequest, replies=PartsSourcingResponse)
 async def handle_parts_request(ctx: Context, sender: str, msg: PartsSourcingRequest):
-    log.info("[parts] Request: part=%s (%s)", msg.part_name, msg.part_number)
+    log.info("[parts] Request received: part=%s (%s)", msg.part_name, msg.part_number)
     try:
         d = await fetch_parts_deterministic(msg.part_name, msg.part_number, msg.context_text)
         excel_path = str(d.get("excel_path") or "")
@@ -77,7 +87,6 @@ async def handle_parts_request(ctx: Context, sender: str, msg: PartsSourcingRequ
         )
         log.info("[parts] Done — $%.2f at %s (%d sources)", d["price_usd"], d["source_site"], len(all_sources))
     except Exception as exc:  # noqa: BLE001
-        # Always respond so the orchestrator isn't left waiting on a timed-out future.
         log.exception("[parts] Service error — sending empty response: %s", exc)
         resp = PartsSourcingResponse(
             price_usd=0.0,
@@ -90,6 +99,7 @@ async def handle_parts_request(ctx: Context, sender: str, msg: PartsSourcingRequ
         )
 
     await ctx.send(sender, resp)
+    log.info("[parts] Response sent back to orchestrator")
 
 
 parts_agent.include(parts_protocol, publish_manifest=False)
@@ -99,8 +109,9 @@ parts_agent.include(parts_protocol, publish_manifest=False)
 @parts_agent.on_event("startup")
 async def startup(ctx: Context):
     log.info("Parts-Sourcing Agent ready")
-    log.info("  Address : %s", ctx.agent.address)
-    log.info("  Endpoint: http://127.0.0.1:%d/submit", PORT)
+    log.info("  Address  : %s", ctx.agent.address)
+    log.info("  Endpoint : http://%s:%d/submit", HOST, PORT)
+    log.info("  Mailbox  : %s", "enabled" if USE_MAILBOX else "disabled (direct HTTP)")
 
 
 if __name__ == "__main__":
