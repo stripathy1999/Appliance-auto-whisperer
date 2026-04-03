@@ -1,15 +1,18 @@
 """
 Parts-Sourcing Worker Agent — run in its own terminal.
 
-Terminal 1:  python workers/parts_agent.py
-Terminal 2:  python workers/tutorial_agent.py
-Terminal 3:  python diagnostic_bureau.py        ← orchestrator
+Quickstart (three terminals):
+  Terminal 1:  python workers/parts_agent.py
+  Terminal 2:  python workers/tutorial_agent.py
+  Terminal 3:  python diagnostic_bureau.py   ← orchestrator
 
-Mailbox mode:
-  When AGENTVERSE_API_KEY is set, the worker registers a mailbox so the
-  Agentverse relay can deliver messages from the orchestrator (also in
-  mailbox mode).  Without a mailbox, Agentverse's relay servers cannot
-  reach 127.0.0.1 and the messages are silently dropped.
+  Or use the launcher:  python run.py
+
+Routing modes (mutually exclusive — matching pdf-podcast-agent pattern):
+  • AGENTVERSE_API_KEY set  → mailbox mode.  The Agentverse relay delivers
+    messages from the orchestrator (also in mailbox mode).
+  • No key (Docker / LAN)  → direct-HTTP endpoint. Set PARTS_AGENT_HOST if
+    the worker isn't on 127.0.0.1 (e.g. container hostname).
 """
 import logging
 import os
@@ -36,23 +39,28 @@ log = logging.getLogger("parts-agent")
 
 # ── Agent ─────────────────────────────────────────────────────────────────────
 
-PORT    = int(os.getenv("PARTS_AGENT_PORT", "8002"))
-SEED    = os.getenv("PARTS_AGENT_SEED", "parts sourcing worker agent seed phrase one")
-HOST    = os.getenv("PARTS_AGENT_HOST", "127.0.0.1")
-AV_KEY  = os.getenv("AGENTVERSE_API_KEY", "").strip()
+PORT   = int(os.getenv("PARTS_AGENT_PORT", "8002"))
+SEED   = os.getenv("PARTS_AGENT_SEED", "parts sourcing worker agent seed phrase one")
+HOST   = os.getenv("PARTS_AGENT_HOST", "127.0.0.1")
+AV_KEY = os.getenv("AGENTVERSE_API_KEY", "").strip()
 
-# Enable mailbox when the orchestrator is also in mailbox mode so the
-# Agentverse relay can deliver messages between both agents.
-# In Docker (direct networking) leave mailbox off and set PARTS_AGENT_HOST.
-USE_MAILBOX = bool(AV_KEY) and not os.getenv("PARTS_AGENT_HOST", "")
+# mailbox (key as value) OR direct endpoint — never both.
+# Passing both triggers "Endpoint configuration overrides mailbox setting"
+# and silently disables the mailbox, so we follow the pdf-podcast-agent pattern:
+#   • AV_KEY set + no custom HOST (local dev) → mailbox via Agentverse relay
+#   • PARTS_AGENT_HOST set (Docker/LAN)       → direct HTTP to that hostname
+#   • no AV_KEY                               → direct HTTP to localhost
+_use_mailbox = bool(AV_KEY) and HOST == "127.0.0.1"
 
 parts_agent = Agent(
     name="parts-sourcing-agent",
     seed=SEED,
     port=PORT,
-    endpoint=[f"http://{HOST}:{PORT}/submit"],
-    mailbox=USE_MAILBOX,
-    **({"agentverse": {"api_key": AV_KEY}} if USE_MAILBOX else {}),
+    **({
+        "mailbox": AV_KEY,                              # Agentverse relay mode
+    } if _use_mailbox else {
+        "endpoint": [f"http://{HOST}:{PORT}/submit"],   # direct HTTP mode
+    }),
     registration_policy=AlmanacApiRegistrationPolicy(),
 )
 
@@ -111,7 +119,7 @@ async def startup(ctx: Context):
     log.info("Parts-Sourcing Agent ready")
     log.info("  Address  : %s", ctx.agent.address)
     log.info("  Endpoint : http://%s:%d/submit", HOST, PORT)
-    log.info("  Mailbox  : %s", "enabled" if USE_MAILBOX else "disabled (direct HTTP)")
+    log.info("  Mailbox  : %s", "enabled" if _use_mailbox else "disabled (direct HTTP)")
 
 
 if __name__ == "__main__":

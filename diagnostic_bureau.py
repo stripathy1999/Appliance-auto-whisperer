@@ -4,19 +4,22 @@ Appliance / Auto Whisperer — Orchestrator Agent
 Receives ChatMessage from ASI:One via Agentverse mailbox, runs the full
 pipeline (Vision → Parts → Tutorial) and sends a Markdown hero response.
 
-Worker communication (scatter-gather):
-  The orchestrator sends PartsSourcingRequest / TutorialSearchRequest to
-  the worker agents and awaits responses via asyncio.Future keyed by
-  session_id.  If workers are not reachable (timeout), it falls back to
-  calling the service functions directly so the agent is always available.
+Worker communication (parallel scatter-gather):
+  Uses ctx.send_and_receive() — the same built-in request/response primitive
+  as pdf-podcast-agent — wrapped in asyncio.gather() for true parallelism.
+  Both workers are called simultaneously; results merge once both reply.
+  If workers are unreachable or timeout, the pipeline falls back to calling
+  the service functions directly so the agent is always available.
 
-Run order (3 separate terminals):
+Run order (three separate terminals):
   1. python workers/parts_agent.py
   2. python workers/tutorial_agent.py
-  3. python diagnostic_bureau.py          ← this file
+  3. python diagnostic_bureau.py   ← this file
+
+  Or use the launcher:  python run.py
 
 Or single-container Docker:
-  docker-compose up --build
+  docker-compose --profile bureau up --build
   (docker-entrypoint.sh starts all 3 processes automatically)
 """
 
@@ -63,22 +66,11 @@ logging.basicConfig(
 )
 log = logging.getLogger("orchestrator")
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Scatter-gather state
-#
-# Maps  "parts:<session_id>"   → asyncio.Future[PartsSourcingResponse]
-#        "tut:<session_id>"    → asyncio.Future[TutorialSearchResponse]
-#
-# Created before ctx.send(); resolved by response handlers below.
-# Cleaned up on TimeoutError so futures don't leak.
-# ──────────────────────────────────────────────────────────────────────────────
-
-_pending: dict[str, asyncio.Future] = {}
-
 # How long to wait for a worker reply before falling back to direct calls.
-# With Agentverse mailbox round-trips (~10-20s each direction) + processing time
-# (~30-40s for parts scraping), 120s is a safe default.
-_WORKER_TIMEOUT_S: float = float(os.getenv("WORKER_TIMEOUT_S", "120"))
+# ctx.send_and_receive() has its own timeout parameter; we pass this value.
+# With Agentverse mailbox round-trips (~10-20s each direction) + processing
+# time (~30-40s for Bright Data scraping), 120s is a safe default.
+_WORKER_TIMEOUT_S: int = int(os.getenv("WORKER_TIMEOUT_S", "120"))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -141,39 +133,6 @@ def _resolve_worker_address(role: str, name: str, default_seed: str) -> str:
 
 chat_protocol = Protocol(spec=chat_protocol_spec)
 
-# ── Internal protocol for worker responses ────────────────────────────────────
-# AgentChatProtocol is locked — worker response types must live on a
-# separate protocol that is included alongside chat_protocol on the agent.
-worker_protocol = Protocol(name="OrchestratorWorkerProtocol", version="0.1.0")
-
-
-@worker_protocol.on_message(model=PartsSourcingResponse)
-async def on_parts_response(ctx: Context, sender: str, msg: PartsSourcingResponse):
-    """Receive parts-pricing reply from parts-sourcing-agent."""
-    key = f"parts:{msg.session_id}"
-    fut = _pending.pop(key, None)
-    if fut and not fut.done():
-        log.info(
-            "[orch] ← parts-agent: $%.2f at %s (%s)",
-            msg.price_usd, msg.source_site, msg.stock_status,
-        )
-        fut.set_result(msg)
-    else:
-        log.warning("[orch] Received unexpected PartsSourcingResponse for session=%s", msg.session_id)
-
-
-@worker_protocol.on_message(model=TutorialSearchResponse)
-async def on_tutorial_response(ctx: Context, sender: str, msg: TutorialSearchResponse):
-    """Receive tutorial reply from tutorial-agent."""
-    key = f"tut:{msg.session_id}"
-    fut = _pending.pop(key, None)
-    if fut and not fut.done():
-        log.info("[orch] ← tutorial-agent: '%s' (%ds)", msg.video_title, msg.duration_seconds)
-        fut.set_result(msg)
-    else:
-        log.warning("[orch] Received unexpected TutorialSearchResponse for session=%s", msg.session_id)
-
-
 # ── Main pipeline handler ─────────────────────────────────────────────────────
 
 def _chat_reply(text: str, *, end_session: bool = True) -> ChatMessage:
@@ -195,14 +154,15 @@ async def orchestrator_chat(ctx: Context, sender: str, msg: ChatMessage):
       2. Parse image + context_text from ChatMessage
       3. Send progress message
       4. Vision LLM → identify part
-      5a. Send PartsSourcingRequest  → parts-agent   (asyncio.Future)
-      5b. Send TutorialSearchRequest → tutorial-agent (asyncio.Future)
-      5c. Await both with timeout; fallback to direct service calls on timeout
+      5. Parallel scatter-gather via ctx.send_and_receive():
+           parts-agent   ← PartsSourcingRequest
+           tutorial-agent ← TutorialSearchRequest
+         Both calls run concurrently inside asyncio.gather().
+         Falls back to direct service calls if workers are unavailable.
       6. Format hero Markdown → send reply
 
-    All steps after the initial ACK are wrapped in a broad try/except so that
-    any unhandled error results in a graceful user-facing message rather than
-    a silent hang in ASI:One.
+    All steps after the ACK are wrapped in a broad try/except so that any
+    unhandled error produces a graceful user-facing message, not a silent hang.
     """
     # 1 ── ACK (outside try/except — must always be sent)
     await ctx.send(
@@ -271,7 +231,12 @@ async def _run_pipeline(ctx: Context, sender: str, msg: ChatMessage) -> None:
         vision["estimated_labor_cost"], vision["confidence"] * 100,
     )
 
-    # 5 ── Fan-out: worker agents (scatter-gather) + direct fallback
+    # 5 ── Fan-out: parallel ctx.send_and_receive() to both workers
+    #
+    # Mirrors the pdf-podcast-agent pattern: asyncio.gather() runs both
+    # send_and_receive calls concurrently so workers execute in parallel.
+    # send_and_receive() handles the full request → mailbox → response cycle
+    # internally; no asyncio.Future plumbing required.
     search_query = (
         f"{context_text} {vision['part_name']} {vision['part_number']} replacement repair tutorial"
     ).strip()
@@ -283,55 +248,47 @@ async def _run_pipeline(ctx: Context, sender: str, msg: ChatMessage) -> None:
         "TUTORIAL", "tutorial-agent", "tutorial youtube worker agent seed two"
     )
 
-    session_id = str(uuid4())
     log.info(
-        "[orch] Scatter-gather → parts=%s | tutorial=%s | session=%s",
-        parts_addr[:20], tut_addr[:20], session_id,
+        "[orch] Scatter-gather (send_and_receive) → parts=%s… | tutorial=%s… | timeout=%ds",
+        parts_addr[:20], tut_addr[:20], _WORKER_TIMEOUT_S,
     )
 
-    # Create futures before sending so there is no window where the response
-    # arrives before the future is registered.
-    loop = asyncio.get_running_loop()
-    parts_fut: asyncio.Future[PartsSourcingResponse] = loop.create_future()
-    tut_fut:   asyncio.Future[TutorialSearchResponse] = loop.create_future()
-    _pending[f"parts:{session_id}"] = parts_fut
-    _pending[f"tut:{session_id}"]   = tut_fut
-
-    await ctx.send(
-        parts_addr,
-        PartsSourcingRequest(
-            part_name=str(vision["part_name"]),
-            part_number=str(vision["part_number"]),
-            context_text=context_text,
-            session_id=session_id,
-        ),
-    )
-    await ctx.send(
-        tut_addr,
-        TutorialSearchRequest(
-            search_query=search_query,
-            session_id=session_id,
-        ),
-    )
-    log.info("[orch] → sent requests to workers (timeout=%.0fs)", _WORKER_TIMEOUT_S)
-
-    # Gather both responses; fallback to direct calls on timeout
-    try:
-        parts_resp, tut_resp = await asyncio.wait_for(
-            asyncio.gather(parts_fut, tut_fut),
+    (parts_resp, parts_status), (tut_resp, tut_status) = await asyncio.gather(
+        ctx.send_and_receive(
+            parts_addr,
+            PartsSourcingRequest(
+                part_name=str(vision["part_name"]),
+                part_number=str(vision["part_number"]),
+                context_text=context_text,
+                session_id=str(uuid4()),
+            ),
+            response_type=PartsSourcingResponse,
             timeout=_WORKER_TIMEOUT_S,
-        )
-        def _source_to_dict(s) -> dict:
-            """Convert PartSource (uAgents Model) or plain dict to a plain dict."""
-            if isinstance(s, dict):
-                return s
-            return {
-                "source_site":  getattr(s, "source_site", ""),
-                "price_usd":    float(getattr(s, "price_usd", 0)),
-                "purchase_url": getattr(s, "purchase_url", ""),
-                "stock_status": getattr(s, "stock_status", ""),
-            }
+        ),
+        ctx.send_and_receive(
+            tut_addr,
+            TutorialSearchRequest(
+                search_query=search_query,
+                session_id=str(uuid4()),
+            ),
+            response_type=TutorialSearchResponse,
+            timeout=_WORKER_TIMEOUT_S,
+        ),
+    )
 
+    def _source_to_dict(s) -> dict:
+        """Convert PartSource (uAgents Model) or plain dict to a plain dict."""
+        if isinstance(s, dict):
+            return s
+        return {
+            "source_site":  getattr(s, "source_site", ""),
+            "price_usd":    float(getattr(s, "price_usd", 0)),
+            "purchase_url": getattr(s, "purchase_url", ""),
+            "stock_status": getattr(s, "stock_status", ""),
+        }
+
+    # Workers responded successfully
+    if parts_resp is not None and tut_resp is not None:
         parts_dict = {
             "price_usd":    parts_resp.price_usd,
             "purchase_url": parts_resp.purchase_url,
@@ -346,18 +303,18 @@ async def _run_pipeline(ctx: Context, sender: str, msg: ChatMessage) -> None:
             "duration_seconds": tut_resp.duration_seconds,
         }
         log.info(
-            "[orch] Gather complete via workers — parts=$%.2f | tutorial='%s'",
-            parts_dict["price_usd"], tut_dict["video_title"],
+            "[orch] ← workers: parts=$%.2f at %s | tutorial='%s'",
+            parts_dict["price_usd"], parts_dict["source_site"], tut_dict["video_title"],
         )
 
-    except asyncio.TimeoutError:
-        # Workers not running or too slow — clean up leaked futures and fall back
-        _pending.pop(f"parts:{session_id}", None)
-        _pending.pop(f"tut:{session_id}",   None)
+    else:
+        # One or both workers timed out / unavailable — fall back to direct calls
         log.warning(
-            "[orch] Workers timed out after %.0fs — falling back to direct service calls. "
-            "Start workers/parts_agent.py and workers/tutorial_agent.py to enable worker mode.",
-            _WORKER_TIMEOUT_S,
+            "[orch] Worker(s) unavailable (parts=%s, tutorial=%s) — "
+            "falling back to direct service calls. "
+            "Run workers/parts_agent.py and workers/tutorial_agent.py to enable worker mode.",
+            "ok" if parts_resp else "timeout",
+            "ok" if tut_resp else "timeout",
         )
         direct_parts, (vurl, vtitle, vdur) = await asyncio.gather(
             fetch_parts_deterministic(
@@ -406,28 +363,32 @@ def main() -> None:
     parts_addr = _address_from_seed("parts-sourcing-agent", parts_seed)
     tut_addr   = _address_from_seed("tutorial-agent", tut_seed)
 
-    use_mailbox = bool(av_key) and not public_endpoint
+    # mailbox (key as value) OR endpoint — never both (pdf-podcast-agent pattern).
+    # Passing both triggers "Endpoint overrides mailbox" and disables the mailbox.
+    _use_mailbox = bool(av_key) and not public_endpoint
     orchestrator = Agent(
         name="repair-orchestrator",
         seed=seed,
         port=port,
-        endpoint=[public_endpoint] if public_endpoint else None,
-        mailbox=use_mailbox,
-        **({"agentverse": {"api_key": av_key}} if av_key else {}),
+        **({
+            "mailbox": av_key,                                      # Agentverse relay
+        } if _use_mailbox else {
+            "endpoint": [public_endpoint or f"http://127.0.0.1:{port}/submit"],  # direct HTTP
+        }),
         network=_network(),
         registration_policy=AlmanacApiRegistrationPolicy(),
     )
 
     orchestrator.include(chat_protocol, publish_manifest=True)
-    orchestrator.include(worker_protocol, publish_manifest=False)
 
     @orchestrator.on_event("startup")
     async def _startup(_ctx: Context) -> None:
-        log.info("[orch] Mailbox active — waiting for messages from ASI:One")
+        mode = "mailbox" if _use_mailbox else "direct HTTP"
+        log.info("[orch] Ready — routing mode: %s", mode)
 
     @orchestrator.on_interval(period=30.0)
     async def _heartbeat(_ctx: Context) -> None:
-        log.info("[orch] ♥ alive — mailbox polling | address=%s", orchestrator.address)
+        log.info("[orch] ♥ alive | address=%s", orchestrator.address)
 
     inspector_url = (
         f"https://agentverse.ai/inspect/"
@@ -439,7 +400,7 @@ def main() -> None:
     log.info("Appliance / Auto Whisperer  —  Orchestrator")
     log.info("=" * 60)
     log.info("Network    : %s", _network())
-    log.info("Mailbox    : %s", "enabled" if use_mailbox else "disabled")
+    log.info("Mailbox    : %s", "enabled" if _use_mailbox else "disabled")
     log.info("Address    : %s", orchestrator.address)
     log.info("")
     log.info("Workers (start BEFORE this agent):")
