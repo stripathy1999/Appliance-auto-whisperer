@@ -139,9 +139,13 @@ def _resolve_worker_address(role: str, name: str, default_seed: str) -> str:
 
 chat_protocol = Protocol(spec=chat_protocol_spec)
 
-# ── Worker response handlers — resolve the waiting asyncio.Future ────────────
+# ── Internal protocol for worker responses ────────────────────────────────────
+# AgentChatProtocol is locked — worker response types must live on a
+# separate protocol that is included alongside chat_protocol on the agent.
+worker_protocol = Protocol(name="OrchestratorWorkerProtocol", version="0.1.0")
 
-@chat_protocol.on_message(model=PartsSourcingResponse)
+
+@worker_protocol.on_message(model=PartsSourcingResponse)
 async def on_parts_response(ctx: Context, sender: str, msg: PartsSourcingResponse):
     """Receive parts-pricing reply from parts-sourcing-agent."""
     key = f"parts:{msg.session_id}"
@@ -156,7 +160,7 @@ async def on_parts_response(ctx: Context, sender: str, msg: PartsSourcingRespons
         log.warning("[orch] Received unexpected PartsSourcingResponse for session=%s", msg.session_id)
 
 
-@chat_protocol.on_message(model=TutorialSearchResponse)
+@worker_protocol.on_message(model=TutorialSearchResponse)
 async def on_tutorial_response(ctx: Context, sender: str, msg: TutorialSearchResponse):
     """Receive tutorial reply from tutorial-agent."""
     key = f"tut:{msg.session_id}"
@@ -391,6 +395,7 @@ def main() -> None:
     )
 
     orchestrator.include(chat_protocol, publish_manifest=True)
+    orchestrator.include(worker_protocol, publish_manifest=False)
 
     @orchestrator.on_event("startup")
     async def _startup(_ctx: Context) -> None:
