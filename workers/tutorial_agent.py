@@ -52,17 +52,26 @@ instructor_protocol = Protocol(name="TutorialSearchProtocol", version="0.3.0")
 @instructor_protocol.on_message(model=TutorialSearchRequest, replies=TutorialSearchResponse)
 async def handle_tutorial_request(ctx: Context, sender: str, msg: TutorialSearchRequest):
     log.info("[tutorial] Query: %s", msg.search_query)
-    vurl, title, dur = await find_best_tutorial_video(msg.search_query)
-    await ctx.send(
-        sender,
-        TutorialSearchResponse(
+    try:
+        vurl, title, dur = await find_best_tutorial_video(msg.search_query)
+        resp = TutorialSearchResponse(
             video_url=vurl,
             video_title=title,
             duration_seconds=dur,
-            session_id=msg.session_id,  # echo back for orchestrator correlation
-        ),
-    )
-    log.info("[tutorial] Done — '%s' %s", title, vurl)
+            session_id=msg.session_id,
+        )
+        log.info("[tutorial] Done — '%s' %s", title, vurl)
+    except Exception as exc:  # noqa: BLE001
+        # Always respond so the orchestrator isn't left waiting on a timed-out future.
+        log.exception("[tutorial] Service error — sending empty response: %s", exc)
+        resp = TutorialSearchResponse(
+            video_url="",
+            video_title="Tutorial unavailable",
+            duration_seconds=0,
+            session_id=msg.session_id,
+        )
+
+    await ctx.send(sender, resp)
 
 
 tutorial_agent.include(instructor_protocol, publish_manifest=False)
@@ -73,7 +82,7 @@ tutorial_agent.include(instructor_protocol, publish_manifest=False)
 async def startup(ctx: Context):
     log.info("Tutorial Agent ready")
     log.info("  Address : %s", ctx.agent.address)
-    log.info("  Endpoint: http://127.0.0.1:%d/submit", PORT)
+    log.info("  Endpoint: http://%s:%d/submit", HOST, PORT)
 
 
 if __name__ == "__main__":

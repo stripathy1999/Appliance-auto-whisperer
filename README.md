@@ -1,9 +1,9 @@
 # Appliance / Auto Whisperer — Right-to-Repair Agent
 
-> **"That is the defrost thermostat. A repairman will charge $250.  
-> You can buy the part for $18 [here](https://www.repairclinic.com) and fix it yourself in 5 minutes [▶ Watch](https://youtube.com)."**
+> **"That's the evaporator fan motor. A repairman will charge $250.  
+> You can buy the part for $19 on Amazon and fix it yourself in 8 minutes — watch how."**
 
-A Fetch.ai multi-agent system that turns a photo of a broken part into a complete DIY repair plan — identifying the part with Gemini Vision, sourcing the cheapest price via Bright Data, and finding the best YouTube tutorial, all in parallel.
+A Fetch.ai multi-agent system that turns a photo of a broken appliance or vehicle part into a complete DIY repair plan. Gemini Vision identifies the part, Bright Data scrapes the cheapest price from 6+ retailers, and YouTube Data API finds the best repair tutorial — all in parallel.
 
 ---
 
@@ -11,37 +11,31 @@ A Fetch.ai multi-agent system that turns a photo of a broken part into a complet
 
 ```
 ASI:One / Agentverse
-       │  ChatMessage (photo + model string)
+       │  ChatMessage (photo + appliance/vehicle model string)
        ▼
-┌─────────────────────────────────────┐
-│   repair-orchestrator  (PUBLIC)     │  Chat Protocol  ← only agent visible to ASI:One
-│                                     │
-│  1. Extract context + image         │
-│  2. Call OpenAI gpt-4o Vision       │  → structured JSON: part_name, part_number,
-│     (strict JSON mode)              │    estimated_labor_cost, confidence, issue_summary
-│                                     │
-│  3. Fan out (asyncio.gather):       │
-│     ┌───────────────────────────┐   │
-│     │ parts-sourcing-agent      │   │  PartsSourcingRequest  →  PartsSourcingResponse
-│     │ (Bright Data Web Unlocker)│   │  price_usd, purchase_url, stock_status
-│     └───────────────────────────┘   │
-│     ┌───────────────────────────┐   │
-│     │ tutorial-agent            │   │  TutorialSearchRequest  →  TutorialSearchResponse
-│     │ (YouTube Data API v3)     │   │  video_url, video_title, duration_seconds
-│     └───────────────────────────┘   │
-│                                     │
-│  4. Calculate savings               │  labor_cost − part_price = total_saved
-│  5. Format hero Markdown            │
-│  6. Return final ChatMessage        │  → EndSessionContent closes ASI:One session
-└─────────────────────────────────────┘
-         ↑ internal (publish_manifest=False)
+┌──────────────────────────────────────────────────────────┐
+│  repair-orchestrator  (port 8001, mailbox, PUBLIC)       │
+│                                                          │
+│  1. ACK + progress message to user                       │
+│  2. Vision LLM  ← Gemini 2.0 Flash via OpenAI SDK       │
+│     → part_name, part_number, labor_cost, confidence     │
+│                                                          │
+│  3. Scatter-gather (asyncio.Future × 2):                 │
+│       ──► parts-sourcing-agent (port 8002)               │
+│             PartsSourcingRequest → PartsSourcingResponse │
+│             Bright Data Web Unlocker · 6+ retailers      │
+│       ──► tutorial-agent (port 8003)                     │
+│             TutorialSearchRequest → TutorialSearchResponse│
+│             YouTube Data API v3                          │
+│                                                          │
+│  4. Format hero Markdown (savings, buy link, tutorial)   │
+│  5. Reply → EndSessionContent closes ASI:One session     │
+└──────────────────────────────────────────────────────────┘
 ```
 
-**Key design choices:**
-- ASI:One talks to **exactly one agent** (`repair-orchestrator`).
-- **OpenAI Python SDK** is used as the unified LLM client — Gemini vision is accessed via Gemini's OpenAI-compatible endpoint (`generativelanguage.googleapis.com/v1beta/openai/`), not the Google ADK. No Anthropic/Claude SDK is used.
-- Bright Data and YouTube calls are **deterministic** — no AI in the scraping/API layer.
-- The orchestrator sends `PartsSourcingRequest` / `TutorialSearchRequest` to the worker agents via **uAgents scatter-gather** (asyncio.Future keyed by session_id). If workers don't respond within `WORKER_TIMEOUT_S` seconds it falls back to direct service calls automatically, so the agent is always available.
+**Worker fallback:** if `parts-agent` or `tutorial-agent` don't respond within `WORKER_TIMEOUT_S` seconds (default 60), the orchestrator calls the service functions directly and responds anyway — the agent is always available.
+
+**SDK:** OpenAI Python SDK only. Gemini is accessed via its [OpenAI-compatible endpoint](https://ai.google.dev/gemini-api/docs/openai). No Google ADK, no Anthropic.
 
 ---
 
@@ -49,45 +43,28 @@ ASI:One / Agentverse
 
 ```
 appliance-auto-whisperer/
-├── diagnostic_bureau.py          ← Orchestrator entry point (Chat Protocol + scatter-gather)
+├── diagnostic_bureau.py          ← Orchestrator entry point
 ├── workers/
-│   ├── parts_agent.py            ← parts-sourcing-agent (Bright Data → price results)
-│   └── tutorial_agent.py         ← tutorial-agent (YouTube Data API v3)
+│   ├── parts_agent.py            ← Bright Data price scraper agent (port 8002)
+│   └── tutorial_agent.py         ← YouTube tutorial search agent (port 8003)
 ├── app/
-│   ├── config/
-│   │   └── settings.py           ← Pydantic Settings (reads .env)
+│   ├── config/settings.py        ← Pydantic Settings (reads .env)
 │   ├── services/
-│   │   ├── openai/
-│   │   │   └── vision_part_extractor.py   ← Vision LLM (Gemini/GPT-4o via OpenAI SDK)
-│   │   ├── brightdata/
-│   │   │   └── part_price_service.py      ← Bright Data Web Unlocker proxy
-│   │   └── youtube/
-│   │       └── instructor_service.py      ← YouTube Data API v3 ranking
+│   │   ├── openai/vision_part_extractor.py   ← Gemini/GPT-4o vision → JSON
+│   │   ├── brightdata/part_price_service.py  ← Web Unlocker proxy scraper
+│   │   └── youtube/instructor_service.py     ← YouTube Data API v3 ranking
 │   └── uagents_protocol/
 │       ├── schemas.py            ← PartsSourcingRequest/Response, TutorialSearch*
 │       ├── chat_inbound.py       ← Parse ChatMessage → context_text + image_b64
 │       └── final_markdown.py     ← Build hero Markdown response
-├── docker-compose.yml            ← Multi-container local deployment (bureau + rest profiles)
+├── docker-compose.yml            ← Multi-container deployment (bureau / rest profiles)
 ├── docker-entrypoint.sh          ← Single-container startup (all 3 agents in one dyno)
-├── Dockerfile.bureau             ← Docker image for all 3 bureau services
-├── Dockerfile                    ← Docker image for REST API only
-├── render.yaml                   ← Render.com service definition (mailbox mode)
-├── .env.example                  ← Copy to .env and fill in API keys
+├── Dockerfile.bureau             ← Docker image for bureau services
+├── Dockerfile                    ← Docker image for REST API
+├── render.yaml                   ← Render.com service definition
+├── .env.example                  ← Copy → .env and fill in keys
 └── requirements.txt
 ```
-
----
-
-## Worker Communication (Scatter-Gather)
-
-When you run **all three processes** (parts-agent, tutorial-agent, orchestrator), the orchestrator communicates with them via the **uAgents message protocol**:
-
-1. Orchestrator sends `PartsSourcingRequest` to `parts-sourcing-agent` and `TutorialSearchRequest` to `tutorial-agent` simultaneously.
-2. Each worker processes the request and sends back `PartsSourcingResponse` / `TutorialSearchResponse`.
-3. The orchestrator awaits both via `asyncio.Future` keyed by `session_id` (up to `WORKER_TIMEOUT_S` seconds).
-4. If workers don't respond in time (e.g. not running), the orchestrator **falls back automatically** to calling the service functions directly — the agent stays available regardless.
-
-> You will see `← parts-agent:` and `← tutorial-agent:` log lines on the orchestrator when communication is working correctly.
 
 ---
 
@@ -95,106 +72,114 @@ When you run **all three processes** (parts-agent, tutorial-agent, orchestrator)
 
 ### 1. Prerequisites
 
-```powershell
-# Python 3.11+ from python.org (not MSYS/Anaconda — needed for prebuilt wheels on Windows)
-python --version   # should print 3.11.x or 3.12.x
-```
+Python 3.11+ from [python.org](https://python.org) (not MSYS/Anaconda — prebuilt wheels needed on Windows).
 
-### 2. Virtual environment + dependencies
+### 2. Install dependencies
 
 ```powershell
-cd "c:\Users\strip\Documents\Cursor\Fetch.ai - Agent Project\appliance-auto-whisperer"
-
-# Activate the shared venv
-& "c:\Users\strip\Documents\Cursor\Fetch.ai - Agent Project\.venv-py313\Scripts\Activate.ps1"
-
+cd appliance-auto-whisperer
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1      # Windows
+# source .venv/bin/activate       # macOS / Linux
 pip install -r requirements.txt
-pip install -e ".[dev]"
 ```
 
 ### 3. Configure `.env`
 
 ```powershell
-cp .env.example .env
+copy .env.example .env   # Windows
+# cp .env.example .env   # macOS / Linux
 ```
 
-Open `.env` and fill in at minimum:
+Fill in at minimum:
 
 | Variable | Where to get it |
 |---|---|
-| `GEMINI_API_KEY` | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) (free tier) |
-| `GEMINI_MODEL` | `models/gemini-2.5-flash` (default) |
-| `YOUTUBE_API_KEY` | Google Cloud Console → Enable *YouTube Data API v3* → Create API key |
-| `BRIGHTDATA_CUSTOMER_ID` | [brightdata.com/cp/zones](https://brightdata.com/cp/zones) |
-| `BRIGHTDATA_API_TOKEN` | Same Bright Data dashboard |
-| `BRIGHTDATA_ZONE` | Zone name (e.g. `web_unlocker1`) |
+| `GEMINI_API_KEY` | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) — free tier, 1 500 req/day |
+| `YOUTUBE_API_KEY` | Google Cloud Console → Enable **YouTube Data API v3** → Create key |
+| `BRIGHTDATA_CUSTOMER_ID` | [brightdata.com](https://brightdata.com) → Zones dashboard |
+| `BRIGHTDATA_API_TOKEN` | Same dashboard |
+| `BRIGHTDATA_ZONE` | Zone name, e.g. `web_unlocker1` |
 | `AGENTVERSE_API_KEY` | [agentverse.ai](https://agentverse.ai) → Account → API Keys |
-| `ORCHESTRATOR_AGENT_SEED` | Run `python -c "import secrets; print(secrets.token_hex(32))"` |
+| `ORCHESTRATOR_AGENT_SEED` | Any random string, or `python -c "import secrets; print(secrets.token_hex(32))"` |
 | `PARTS_AGENT_SEED` | Same |
 | `TUTORIAL_AGENT_SEED` | Same |
 
-### 4. Run — 3 separate terminals
+> `OPENAI_API_KEY` is only needed if you set `VISION_PROVIDER=openai`. Gemini is the default and is free.
 
-Each agent is a standalone process. Open **3 PowerShell tabs** in the project folder:
+### 4. Run — 3 terminals, start workers first
 
 **Terminal 1 — Parts-Sourcing Worker (port 8002)**
 ```powershell
 python workers/parts_agent.py
 ```
+Expected: `Parts-Sourcing Agent ready · Address: agent1q...`
 
 **Terminal 2 — Tutorial Worker (port 8003)**
 ```powershell
 python workers/tutorial_agent.py
 ```
+Expected: `Tutorial Agent ready · Address: agent1q...`
 
-**Terminal 3 — Orchestrator / ASI:One gateway (port 8001, mailbox)**
+**Terminal 3 — Orchestrator / ASI:One gateway (port 8001)**
 ```powershell
 python diagnostic_bureau.py
 ```
-
-> Start workers **before** the orchestrator. They need ~5 seconds to register on the Almanac before the orchestrator begins routing to them.
-
-Expected orchestrator startup output:
-
+Expected (after ~5 s):
 ```
 ============================================================
 Appliance / Auto Whisperer  —  Orchestrator
 ============================================================
 Network    : testnet
-Mode       : mailbox (Agentverse)
-Agentverse : configured
+Mailbox    : enabled
+Address    : agent1q...
 
-PUBLIC  repair-orchestrator   → agent1q...
-WORKER  parts-sourcing-agent  → agent1q...
-WORKER  tutorial-agent        → agent1q...
+Workers (start BEFORE this agent):
+  parts-agent    port=8002  address=agent1q...
+  tutorial-agent port=8003  address=agent1q...
 
-Copy the repair-orchestrator address above and register it in Agentverse
-so ASI:One can discover it.
+Worker timeout : 60s (set WORKER_TIMEOUT_S to adjust)
+Fallback       : direct service calls if workers don't respond in time
 ============================================================
+[repair-orchestrator]: Manifest published successfully: AgentChatProtocol
+[uagents.registration]: Registration on Almanac API successful
+[orch] ♥ alive — mailbox polling | address=agent1q...
 ```
+
+> Workers must be registered on the Almanac (~5 s) before the orchestrator starts routing to them. If you start the orchestrator first, it will fall back to direct calls for the first request and switch to worker mode automatically on subsequent ones.
 
 ---
 
-## Register with Agentverse (so ASI:One can find it)
+## Register with Agentverse
 
 1. Go to [agentverse.ai](https://agentverse.ai) → **My Agents** → **Register External Agent**.
 2. Paste the `repair-orchestrator` address printed at startup.
-3. Give it a name, description, and the Chat Protocol manifest (auto-published when `publish_manifest=True`).
-4. In ASI:One, search for the agent name — you should be able to chat with it directly.
+3. Give it a name and description (e.g. *Appliance Auto Whisperer*).
+4. The Chat Protocol manifest is published automatically — no extra steps.
+5. In **ASI:One**, search for the agent name to start chatting.
 
 ---
 
-## Send a test message via ASI:One
+## Test via ASI:One
 
-1. Open ASI:One and start a chat with **Appliance Auto Whisperer**.
-2. Attach a photo (e.g. a cracked fridge bin, a weird dashboard light).
-3. Type the model string: `Whirlpool WRF535SWHZ00`.
-4. Hit send — you'll get:
-   - An immediate acknowledgement
-   - A "Analysing your photo..." progress message
-   - The final hero response with diagnosis, cost breakdown, buy link, and tutorial link
+1. Open [ASI:One](https://asi1.ai) and start a chat with **Appliance Auto Whisperer**.
+2. Attach a photo of the broken part.
+3. Type the appliance or vehicle model: e.g. `Whirlpool WRF560SEYM05`.
+4. Hit send — you'll receive:
+   - Immediate ACK
+   - A "Analysing…" progress message
+   - The full hero response (diagnosis, cost breakdown, buy links, tutorial)
 
-### Example output
+When the scatter-gather is working you'll see on the **orchestrator terminal**:
+```
+[orch] Scatter-gather → parts=agent1qffc... | tutorial=agent1qvdn... | session=<uuid>
+[orch] → sent requests to workers (timeout=60s)
+[orch] ← parts-agent: $19.98 at amazon.com (In Stock)
+[orch] ← tutorial-agent: 'Why Isn't Your Fridge Cold? ...' (19s)
+[orch] Gather complete via workers — parts=$19.98 | tutorial='...'
+```
+
+### Example response
 
 ```markdown
 ### 🔍 Diagnostic Complete
@@ -202,9 +187,9 @@ so ASI:One can discover it.
 **Identified Part:** Evaporator Fan Motor
 **Part Number:** `W10312696`
 
-> Fan motor has seized — fridge not cooling properly.
+> Fan motor has seized — fridge not cooling.
 
-*Confidence: 🟢 91% confident*
+*Confidence: 🟢 95% confident*
 
 ---
 
@@ -212,20 +197,27 @@ so ASI:One can discover it.
 
 |  |  |
 | :--- | ---: |
-| Standard repairman estimate | **$250.00** |
-| DIY part cost (repairclinic.com) | **$34.99** |
-| **Total savings** | **+$215.01** |
+| Repairman estimate | **$250.00** |
+| Best DIY part cost (amazon.com) | **$19.98** |
+| **Total savings** | **+$230.02** |
+
+🏆 **Best price: $19.98** at **amazon.com** — **[→ Buy Now](https://amazon.com/...)**
 
 ---
 
-### 🛒 Buy the Part
-**[Order Replacement Part — Evaporator Fan Motor](https://www.repairclinic.com/...)**
-*Stock: in_stock*
+### 🛒 Buy the Part — All Sources Found
+
+| # | Store | Price | Stock | Link |
+| :- | :---- | ----: | :---- | :--- |
+| 1 ⭐ BEST | amazon.com | **$19.98** | In Stock | [→ Buy](...) |
+| 2 | repairclinic.com | $34.99 | In Stock | [→ Buy](...) |
+| 3 | ebay.com | $22.50 | Check Vendor | [→ Buy](...) |
 
 ---
 
 ### 🎬 How to Fix It Yourself
-**[Whirlpool Refrigerator Evaporator Fan Motor Replacement](https://youtube.com/watch?v=...)**  · 6m 12s
+
+**[Why Isn't Your Fridge Cold? Check Your Evaporator Fan!](https://youtube.com/...)**  · 19s
 
 ---
 *You've got this! 🛠️*
@@ -235,69 +227,69 @@ so ASI:One can discover it.
 
 ## Deploy with Docker (local)
 
-Copy `.env.example` to `.env` and fill in required keys, then choose a mode:
+Copy `.env.example` → `.env`, then choose a mode:
 
-**Mode A — Full 3-agent bureau (recommended, proper inter-agent communication):**
+**Mode A — Full 3-agent bureau (recommended)**
 ```bash
 docker-compose --profile bureau up --build
 # or: make docker-up
 ```
-Starts `parts-agent` (port 8002) + `tutorial-agent` (port 8003) + `orchestrator` (port 8001).
-Workers come up first; orchestrator waits for both to be healthy before starting.
+Starts `parts-agent` (8002) + `tutorial-agent` (8003) + `orchestrator` (8001).
+Orchestrator waits for both worker healthchecks before starting.
 
-**Mode B — REST API only (no uAgents, simpler):**
+**Mode B — REST API only**
 ```bash
 docker-compose --profile rest up --build
 # or: make docker-up-rest
 ```
-REST endpoint at `http://localhost:8000/health` and `POST /v1/chat`.
+REST at `http://localhost:8000`.
 
-**Mode C — Single container (all 3 in one, Render-style):**
+**Mode C — Single container (Render-style)**
 ```bash
 docker build -f Dockerfile.bureau -t whisperer-bureau .
 docker run --env-file .env -e PORT=8001 -p 8001:8001 \
   --entrypoint /app/docker-entrypoint.sh whisperer-bureau
 ```
+`docker-entrypoint.sh` starts all 3 processes, waits `WORKER_READY_WAIT` seconds (default 8) for workers to register, then starts the orchestrator.
 
 ---
 
 ## Deploy to Render (mailbox mode)
 
-1. Push this folder to a GitHub repo.
-2. In Render dashboard: **New → Web Service → Docker** → point at the repo, set `Dockerfile Path` to `./Dockerfile.bureau`.
-3. Add environment variables from `.env` (Render encrypts secrets). Leave `AGENT_ENDPOINT` blank.
-4. Deploy — Render injects `PORT`; the bureau reads it automatically.
-5. Note the orchestrator address from Render logs and register it in Agentverse (see above).
-
----
-
-## Run tests
-
-```powershell
-python -m pytest tests/ -v
-```
+1. Push this repo to GitHub.
+2. Render dashboard → **New → Web Service → Docker** → select the repo, set `Dockerfile Path` to `./Dockerfile.bureau`.
+3. Add secrets from `.env` in the Render environment panel. Leave `AGENT_ENDPOINT` **blank** (mailbox mode).
+4. Deploy — Render injects `PORT`; the orchestrator reads it automatically.
+5. Copy the `repair-orchestrator` address from Render logs and register it in Agentverse.
 
 ---
 
 ## Troubleshooting
 
-### Port already in use (`[Errno 10048]`)
+### Port already in use (`[Errno 10048]` on Windows)
 
 ```powershell
-# Find and kill the process on port 8000
-$p = (Get-NetTCPConnection -LocalPort 8000 -State Listen -EA SilentlyContinue).OwningProcess
-if ($p) { Stop-Process -Id $p -Force; "Killed PID $p" } else { "Port 8000 is free" }
+$p = (Get-NetTCPConnection -LocalPort 8001 -State Listen -EA SilentlyContinue).OwningProcess
+if ($p) { Stop-Process -Id $p -Force; "Killed PID $p" } else { "Port free" }
 ```
+The orchestrator also auto-kills stale processes on startup via `psutil` (install with `pip install psutil`).
 
-### `jiter` build failure on Windows (OpenAI dependency)
+### Workers show no log activity when a message arrives
 
-Use Python from **python.org** (not MSYS/Conda) so prebuilt wheels are available, or run inside Docker (`docker build -f Dockerfile.bureau -t whisperer . && docker run --env-file .env -e PORT=8001 -p 8001:8001 whisperer`).
+The orchestrator logs `[orch] Scatter-gather →` when it dispatches to workers. If you see `[orch] Workers timed out` instead, the workers haven't registered on the Almanac yet — wait ~5 s after starting them and try again.
 
-### Bright Data returns no price
+### `jiter` build failure on Windows
 
-Verify `BRIGHTDATA_CUSTOMER_ID`, `BRIGHTDATA_API_TOKEN`, and `BRIGHTDATA_ZONE` are set. Check that the zone type is **Web Unlocker**. The proxy URL format is:  
-`brd-customer-{CUSTOMER_ID}-zone-{ZONE}:{TOKEN}@brd.superproxy.io:22225`
+Use Python from **python.org** (not MSYS/Conda), or build inside Docker.
+
+### Bright Data returns no prices
+
+Check `BRIGHTDATA_CUSTOMER_ID`, `BRIGHTDATA_API_TOKEN`, and `BRIGHTDATA_ZONE`. Zone type must be **Web Unlocker**. PartSelect requires a premium access upgrade (separate from the base zone).
 
 ### YouTube returns a placeholder link
 
-Set `YOUTUBE_API_KEY`. Enable the **YouTube Data API v3** in Google Cloud Console for the project that owns the key.
+Set `YOUTUBE_API_KEY` and enable **YouTube Data API v3** in Google Cloud Console.
+
+### Gemini returns 503
+
+Transient — the OpenAI client retries automatically (you'll see `Retrying request` in logs). If it persists, check your `GEMINI_API_KEY` quota at [aistudio.google.com](https://aistudio.google.com).

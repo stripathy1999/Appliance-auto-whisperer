@@ -53,35 +53,43 @@ parts_protocol = Protocol(name="PartsSourcingProtocol", version="0.3.0")
 
 @parts_protocol.on_message(model=PartsSourcingRequest, replies=PartsSourcingResponse)
 async def handle_parts_request(ctx: Context, sender: str, msg: PartsSourcingRequest):
-    log.info("[parts] Request: part=%s (%s) context=%r", msg.part_name, msg.part_number, msg.context_text)
-    d = await fetch_parts_deterministic(msg.part_name, msg.part_number, msg.context_text)
-
-    # fetch_parts_deterministic already saves the Excel report and returns its path.
-    excel_path = str(d.get("excel_path") or "")
-
-    all_sources = [
-        PartSource(
-            source_site=str(s.get("source_site", "")),
-            price_usd=float(s.get("price_usd", 0)),
-            purchase_url=str(s.get("purchase_url", "")),
-            stock_status=str(s.get("stock_status", "")),
-        )
-        for s in d.get("all_sources", [])
-    ]
-
-    await ctx.send(
-        sender,
-        PartsSourcingResponse(
+    log.info("[parts] Request: part=%s (%s)", msg.part_name, msg.part_number)
+    try:
+        d = await fetch_parts_deterministic(msg.part_name, msg.part_number, msg.context_text)
+        excel_path = str(d.get("excel_path") or "")
+        all_sources = [
+            PartSource(
+                source_site=str(s.get("source_site", "")),
+                price_usd=float(s.get("price_usd", 0)),
+                purchase_url=str(s.get("purchase_url", "")),
+                stock_status=str(s.get("stock_status", "")),
+            )
+            for s in d.get("all_sources", [])
+        ]
+        resp = PartsSourcingResponse(
             price_usd=float(d["price_usd"]),
             purchase_url=str(d["purchase_url"]),
             stock_status=str(d["stock_status"]),
             source_site=str(d["source_site"]),
             all_sources=all_sources,
             excel_path=excel_path,
-            session_id=msg.session_id,  # echo back for orchestrator correlation
-        ),
-    )
-    log.info("[parts] Done — $%.2f at %s (%d sources)", d["price_usd"], d["purchase_url"], len(all_sources))
+            session_id=msg.session_id,
+        )
+        log.info("[parts] Done — $%.2f at %s (%d sources)", d["price_usd"], d["source_site"], len(all_sources))
+    except Exception as exc:  # noqa: BLE001
+        # Always respond so the orchestrator isn't left waiting on a timed-out future.
+        log.exception("[parts] Service error — sending empty response: %s", exc)
+        resp = PartsSourcingResponse(
+            price_usd=0.0,
+            purchase_url="",
+            stock_status="error",
+            source_site="error",
+            all_sources=[],
+            excel_path="",
+            session_id=msg.session_id,
+        )
+
+    await ctx.send(sender, resp)
 
 
 parts_agent.include(parts_protocol, publish_manifest=False)

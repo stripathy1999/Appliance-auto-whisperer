@@ -197,13 +197,32 @@ async def orchestrator_chat(ctx: Context, sender: str, msg: ChatMessage):
       5b. Send TutorialSearchRequest → tutorial-agent (asyncio.Future)
       5c. Await both with timeout; fallback to direct service calls on timeout
       6. Format hero Markdown → send reply
+
+    All steps after the initial ACK are wrapped in a broad try/except so that
+    any unhandled error results in a graceful user-facing message rather than
+    a silent hang in ASI:One.
     """
-    # 1 ── ACK
+    # 1 ── ACK (outside try/except — must always be sent)
     await ctx.send(
         sender,
         ChatAcknowledgement(acknowledged_msg_id=msg.msg_id, timestamp=msg.timestamp),
     )
 
+    try:
+        await _run_pipeline(ctx, sender, msg)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("[orch] Unhandled error in pipeline: %s", exc)
+        try:
+            await ctx.send(sender, _chat_reply(
+                "Sorry, something went wrong on my end. "
+                "Please try again in a moment — or check the agent logs for details."
+            ))
+        except Exception:
+            pass
+
+
+async def _run_pipeline(ctx: Context, sender: str, msg: ChatMessage) -> None:
+    """Inner pipeline — called by orchestrator_chat inside a broad try/except."""
     # 2 ── Parse inputs
     context_text, image_b64 = await extract_diagnostic_inputs(msg)
     log.info("[orch] context=%r | has_image=%s", context_text, bool(image_b64))
@@ -223,9 +242,12 @@ async def orchestrator_chat(ctx: Context, sender: str, msg: ChatMessage):
         ))
         return
 
+    # Truncate for the progress message only — protect against very long inputs
+    _preview = context_text[:80] + ("…" if len(context_text) > 80 else "")
+
     # 3 ── Progress message (prevents ASI:One timeout)
     await ctx.send(sender, _chat_reply(
-        f"Analysing your photo against **{context_text}** — "
+        f"Analysing your photo against **{_preview}** — "
         "identifying the part, checking prices and finding a tutorial...",
         end_session=False,
     ))
