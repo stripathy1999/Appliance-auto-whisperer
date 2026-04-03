@@ -8,11 +8,13 @@ Quickstart (three terminals):
 
   Or use the launcher:  python run.py
 
-Routing modes (mutually exclusive — matching pdf-podcast-agent pattern):
-  • AGENTVERSE_API_KEY set  → mailbox mode.  The Agentverse relay delivers
-    messages from the orchestrator (also in mailbox mode).
-  • No key (Docker / LAN)  → direct-HTTP endpoint. Set TUTORIAL_AGENT_HOST
-    if the worker isn't on 127.0.0.1 (e.g. container hostname).
+Routing:
+  Workers ALWAYS use a direct HTTP submit endpoint (matching pdf-podcast-agent).
+  The orchestrator resolves this address from the Almanac and POSTs directly
+  via aiohttp — no Agentverse relay needed for worker-to-worker traffic.
+  Only the orchestrator uses a mailbox (to receive from ASI:One).
+  Set TUTORIAL_AGENT_HOST when running in Docker so the endpoint hostname
+  matches the container name (e.g. "tutorial-agent") instead of "127.0.0.1".
 """
 import logging
 import os
@@ -39,28 +41,18 @@ log = logging.getLogger("tutorial-agent")
 
 # ── Agent ─────────────────────────────────────────────────────────────────────
 
-PORT   = int(os.getenv("TUTORIAL_AGENT_PORT", "8003"))
-SEED   = os.getenv("TUTORIAL_AGENT_SEED", "tutorial youtube worker agent seed two")
-HOST   = os.getenv("TUTORIAL_AGENT_HOST", "127.0.0.1")
-AV_KEY = os.getenv("AGENTVERSE_API_KEY", "").strip()
+PORT = int(os.getenv("TUTORIAL_AGENT_PORT", "8003"))
+SEED = os.getenv("TUTORIAL_AGENT_SEED", "tutorial youtube worker agent seed two")
+HOST = os.getenv("TUTORIAL_AGENT_HOST", "127.0.0.1")
 
-# mailbox (key as value) OR direct endpoint — never both.
-# Passing both triggers "Endpoint configuration overrides mailbox setting"
-# and silently disables the mailbox, so we follow the pdf-podcast-agent pattern:
-#   • AV_KEY set + no custom HOST (local dev) → mailbox via Agentverse relay
-#   • TUTORIAL_AGENT_HOST set (Docker/LAN)    → direct HTTP to that hostname
-#   • no AV_KEY                               → direct HTTP to localhost
-_use_mailbox = bool(AV_KEY) and HOST == "127.0.0.1"
-
+# Workers always use a direct HTTP endpoint — no mailbox.
+# The orchestrator resolves this address from the Almanac and POSTs aiohttp
+# directly here.  Only the orchestrator uses Agentverse mailbox (for ASI:One).
 tutorial_agent = Agent(
     name="tutorial-agent",
     seed=SEED,
     port=PORT,
-    **({
-        "mailbox": AV_KEY,                              # Agentverse relay mode
-    } if _use_mailbox else {
-        "endpoint": [f"http://{HOST}:{PORT}/submit"],   # direct HTTP mode
-    }),
+    endpoint=[f"http://{HOST}:{PORT}/submit"],
     registration_policy=AlmanacApiRegistrationPolicy(),
 )
 
@@ -103,7 +95,7 @@ async def startup(ctx: Context):
     log.info("Tutorial Agent ready")
     log.info("  Address  : %s", ctx.agent.address)
     log.info("  Endpoint : http://%s:%d/submit", HOST, PORT)
-    log.info("  Mailbox  : %s", "enabled" if _use_mailbox else "disabled (direct HTTP)")
+    log.info("  Mode     : direct HTTP (orchestrator POSTs here directly)")
 
 
 if __name__ == "__main__":
